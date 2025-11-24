@@ -1,0 +1,296 @@
+# ==========================================
+# AZURE DEVOPS COMPREHENSIVE PIPELINE TEMPLATE
+# Copy → simplify per project
+# ==========================================
+
+name: $(Date:yyyyMMdd)$(Rev:.r)
+
+# -----------------------
+# TRIGGERS
+# -----------------------
+trigger:
+  branches:
+    include:
+      - main
+      - releases/*
+  paths:
+    include:
+      - src/*
+      - infra/*
+    exclude:
+      - docs/*
+
+pr:
+  branches:
+    include:
+      - main
+      - develop
+
+# Optional scheduled runs
+schedules:
+- cron: "0 2 * * Mon-Fri"     # 02:00 UTC weekdays
+  displayName: Nightly build
+  branches:
+    include:
+      - main
+  always: true
+
+# -----------------------
+# RESOURCES (multi-repo, pipelines, containers)
+# -----------------------
+resources:
+  repositories:
+  - repository: infraRepo
+    type: git
+    name: MyProject/infra-repo
+    ref: refs/heads/main
+  - repository: templatesRepo
+    type: git
+    name: MyProject/pipeline-templates
+    ref: refs/tags/v1.2.3
+
+  pipelines:
+  - pipeline: upstreamBuild
+    source: MyProject.Upstream-CI
+    trigger: true
+
+  containers:
+  - container: ubuntu_tooling
+    image: mcr.microsoft.com/azure-cli:2.64.0
+
+# -----------------------
+# PARAMETERS (compile-time)
+# -----------------------
+parameters:
+- name: environment
+  type: string
+  default: dev
+  values: [dev, acc, prod]
+
+- name: runInfra
+  type: boolean
+  default: true
+
+- name: runTests
+  type: boolean
+  default: true
+
+- name: extraArgs
+  type: string
+  default: ""
+
+# -----------------------
+# VARIABLES (runtime)
+# -----------------------
+variables:
+  # Inline vars
+  vmImage: ubuntu-latest
+  buildConfig: Release
+
+  # Variable groups (library)
+  - group: shared-secrets   # e.g. contains AZ_SUB_ID, SPN secrets, etc.
+
+  # Environment-specific variable template
+  - template: variables/vars-${{ parameters.environment }}.yaml
+
+# ==========================================
+# STAGES
+# ==========================================
+stages:
+
+# ------------------------------------------
+# STAGE 1: PREP / CHECKOUT / METADATA
+# ------------------------------------------
+- stage: Prep
+  displayName: "Prep"
+  jobs:
+  - job: prep
+    displayName: "Checkout + set outputs"
+    pool:
+      vmImage: $(vmImage)
+
+    steps:
+    - checkout: self
+      displayName: "Checkout self"
+      fetchDepth: 0
+
+    - checkout: infraRepo
+      displayName: "Checkout infra repo"
+      path: shared-infra
+
+    - checkout: templatesRepo
+      displayName: "Checkout templates repo"
+      path: templates
+
+    - script: |
+        echo "Self root: $(System.DefaultWorkingDirectory)"
+        echo "Workspace: $(Pipeline.Workspace)"
+        echo "Infra root: $(Pipeline.Workspace)/shared-infra"
+        echo "Templates root: $(Pipeline.Workspace)/templates"
+      displayName: "Show directories"
+
+    # Example: set an output variable for later stages
+    - bash: |
+        echo "##vso[task.setvariable variable=gitSha;isOutput=true]$(Build.SourceVersion)"
+      name: setvars
+      displayName: "Set output vars"
+
+# ------------------------------------------
+# STAGE 2: BUILD (matrix, cache, artifacts)
+# ------------------------------------------
+- stage: Build
+  displayName: "Build"
+  dependsOn: Prep
+  variables:
+    gitShaFromPrep: $[ stageDependencies.Prep.prep.outputs['setvars.gitSha'] ]
+  jobs:
+
+  # Matrix job example
+  - job: build_matrix
+    displayName: "Build (matrix)"
+    pool:
+      vmImage: $(vmImage)
+    strategy:
+      matrix:
+        linux:
+          osName: linux
+        linux_alt:
+          osName: linux_alt
+
+    steps:
+    - checkout: self
+
+    # Cache example (Node)
+    - task: Cache@2
+      inputs:
+        key: 'npm | "$(Agent.OS)" | package-lock.json'
+        restoreKeys: |
+          npm | "$(Agent.OS)"
+        path: $(Pipeline.Workspace)/.npm
+      displayName: "Cache npm"
+
+    - bash: |
+        echo "Building on $(osName)"
+        echo "Git SHA from Prep: $(gitShaFromPrep)"
+        # build commands here
+      displayName: "Run build"
+
+    # Publish build artifacts
+    - publish: $(System.DefaultWorkingDirectory)/dist
+      artifact: drop
+      displayName: "Publish artifact: drop"
+
+# ------------------------------------------
+# STAGE 3: TESTS (conditional)
+# ------------------------------------------
+- stage: Test
+  displayName: "Test"
+  dependsOn: Build
+  condition: and(succeeded(), eq('${{ parameters.runTests }}', true))
+  jobs:
+  - job: unit_tests
+    displayName: "Unit tests"
+    pool:
+      vmImage: $(vmImage)
+    steps:
+    - checkout: self
+    - bash: |
+        echo "Run tests here"
+        # pytest / npm test / dotnet test etc
+      displayName: "Execute tests"
+
+# ------------------------------------------
+# STAGE 4: INFRA DEPLOY (deployment job)
+# ------------------------------------------
+- stage: Infra
+  displayName: "Deploy Infra"
+  dependsOn: Test
+  condition: and(succeeded(), eq('${{ parameters.runInfra }}', true))
+  jobs:
+  - deployment: deploy_infra
+    displayName: "Infra deployment"
+    environment: $(adoEnvironmentName)  # from vars template
+    pool:
+      vmImage: $(vmImage)
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+          - checkout: infraRepo
+            path: shared-infra
+
+          # AzureCLI using service connection
+          - task: AzureCLI@2
+            displayName: "az group list (sanity)"
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az account show -o table
+                az group list -o table
+
+          # Example: Bicep deploy
+          - task: AzureCLI@2
+            displayName: "Deploy Bicep"
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              workingDirectory: $(Pipeline.Workspace)/shared-infra/infra
+              inlineScript: |
+                az deployment sub create \
+                  --location $(location) \
+                  --template-file main.bicep \
+                  --parameters main.${{ parameters.environment }}.bicepparam \
+                  ${{ parameters.extraArgs }}
+
+# ------------------------------------------
+# STAGE 5: APP DEPLOY (downloads artifact)
+# ------------------------------------------
+- stage: App
+  displayName: "Deploy App"
+  dependsOn: Infra
+  jobs:
+  - deployment: deploy_app
+    displayName: "App deployment"
+    environment: $(adoEnvironmentName)
+    pool:
+      vmImage: $(vmImage)
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: current
+            artifact: drop
+            displayName: "Download build artifact"
+
+          - bash: |
+              echo "Deploying app from artifact..."
+              ls -la $(Pipeline.Workspace)/drop
+            displayName: "Deploy steps go here"
+
+# ------------------------------------------
+# STAGE 6: POST / NOTIFY / CLEANUP (always)
+# ------------------------------------------
+- stage: Post
+  displayName: "Post"
+  dependsOn:
+    - App
+  condition: always()
+  jobs:
+  - job: notify
+    displayName: "Notify & cleanup"
+    pool:
+      vmImage: $(vmImage)
+    steps:
+    - bash: |
+        echo "Pipeline finished with status: $(Agent.JobStatus)"
+      displayName: "Summary"
+
+    # Example: create a work item / send teams message using templates
+    - template: templates/notify.yml@templatesRepo
+      parameters:
+        environment: ${{ parameters.environment }}
+        status: $(Agent.JobStatus)
