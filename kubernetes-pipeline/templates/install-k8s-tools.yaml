@@ -33,9 +33,18 @@ steps:
   # INSTALL AZURE CLI
   # ----------------------------
   - ${{ if eq(parameters.installAzureCLI, true) }}:
-    - script: |
-        curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
-        az version
+    - bash: |
+        # Check if az is already installed (common on Microsoft-hosted agents)
+        if command -v az &> /dev/null; then
+          echo "Azure CLI already installed"
+          az version
+        else
+          echo "Installing Azure CLI..."
+          curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+          # Reload PATH
+          export PATH=$PATH:/usr/bin
+          az version
+        fi
       displayName: "Install Azure CLI"
 
   # ----------------------------
