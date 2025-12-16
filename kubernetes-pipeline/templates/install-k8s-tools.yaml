@@ -94,8 +94,9 @@ steps:
       echo "=========================================="
       echo "K8S TOOLS INSTALLATION SUMMARY"
       echo "=========================================="
-      ${{ if eq(parameters.installAzureCLI, true) }}:
+      if command -v az &> /dev/null; then
         echo "az cli: $(az version --query '"azure-cli"' -o tsv)"
+      fi
       echo "kubectl: $(kubectl version --client --short 2>/dev/null || kubectl version --client -o yaml | grep gitVersion | head -1)"
       echo "helm: $(helm version --short)"
       echo "=========================================="
