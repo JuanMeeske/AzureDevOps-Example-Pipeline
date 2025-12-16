@@ -1,177 +1,215 @@
-Azure DevOps Pipeline – Comprehensive Reusable Template
+# Azure DevOps Pipeline Template
 
-This repository contains a multi-stage Azure DevOps YAML pipeline designed as a reusable baseline for most CI/CD scenarios.
-It supports:
-	•	CI triggers (branch + path filters)
-	•	PR validation
-	•	Scheduled (nightly) runs
-	•	Multi-repo checkout
-	•	Matrix builds
-	•	Caching
-	•	Artifact publishing & consumption
-	•	Conditional stages (tests/infra)
-	•	Azure infrastructure deployment using AzureCLI@2
-	•	Environment-based deployments
-	•	Reusable templates
+A production-ready, multi-stage Azure DevOps YAML pipeline designed as a reusable baseline for CI/CD scenarios.
 
-⸻
+---
 
-Pipeline File
+## Features
 
-Main pipeline is defined in:
+| Category | Capabilities |
+|----------|-------------|
+| **Triggers** | CI (branch + path filters), PR validation, Scheduled (nightly) |
+| **Build** | Matrix builds, Caching, Artifact publishing |
+| **Deploy** | Environment-based deployments, Azure CLI integration, Bicep/Terraform support |
+| **Architecture** | Multi-repo checkout, Reusable templates, Conditional stages |
 
-pipeline.yml
+---
 
-Environment-specific variables are loaded from:
+## Pipeline Flow
 
-variables/
-  vars-dev.yaml
-  vars-acc.yaml
-  vars-prod.yaml
+```
+┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐
+│  Prep   │───▶│  Build  │───▶│  Test   │───▶│  Infra  │───▶│   App   │───▶│  Post   │
+│         │    │         │    │(optional)│    │(optional)│    │         │    │(always) │
+└─────────┘    └─────────┘    └─────────┘    └─────────┘    └─────────┘    └─────────┘
+     │              │              │              │              │              │
+  checkout      matrix         unit tests     Bicep/TF       artifact       notify
+  multi-repo    cache          pytest         deploy         deploy         cleanup
+  set outputs   artifacts      dotnet test    az cli         app logic      work items
+```
 
+---
 
-⸻
+## Quick Start
 
-Stages Overview
+1. Copy `az-pipeline.yaml` into your repository
+2. Create environment variable files in `variables/`:
+   ```
+   variables/
+   ├── vars-dev.yaml
+   ├── vars-acc.yaml
+   └── vars-prod.yaml
+   ```
+3. Update repository references in `resources.repositories`
+4. Configure your Azure Service Connection
+5. Run the pipeline manually to validate
 
-1. Prep
+---
 
-Goal: checkout repos, print working dirs, set output variables.
-	•	Checks out:
-	•	self repo
-	•	infraRepo
-	•	templatesRepo
-	•	Logs directory roots for debugging.
-	•	Exports output variables (example: git SHA).
+## File Structure
 
-2. Build
+```
+├── az-pipeline.yaml          # Main pipeline definition
+└── variables/
+    ├── vars-dev.yaml         # Dev environment variables
+    ├── vars-acc.yaml         # Acceptance environment variables
+    └── vars-prod.yaml        # Production environment variables
+```
 
-Goal: build your application.
-	•	Runs as a matrix job (example for future parallel OS builds).
-	•	Restores/creates cache (example uses npm).
-	•	Publishes artifacts named drop.
+---
 
-3. Test (optional)
+## Parameters
 
-Goal: run unit tests.
-	•	Only runs if runTests=true.
+Compile-time parameters for manual or triggered runs:
 
-4. Infra
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `environment` | string | `dev` | Target environment (`dev`, `acc`, `prod`) |
+| `runInfra` | boolean | `true` | Toggle infrastructure deployment stage |
+| `runTests` | boolean | `true` | Toggle test execution stage |
+| `extraArgs` | string | `""` | Extra CLI args for infra deploy (e.g., `--what-if`) |
 
-Goal: deploy infrastructure (Bicep, Terraform, ARM, etc.).
-	•	Uses a deployment job
-	•	Runs against Azure DevOps environment
-	•	Performs sanity check (az group list)
-	•	Executes infra deployment (example uses Bicep)
+**Example manual trigger:**
 
-5. App
-
-Goal: deploy application using published artifacts.
-	•	Downloads the drop artifact from Build stage.
-	•	Runs your deploy logic.
-
-6. Post
-
-Goal: always-run finalization.
-	•	Runs even if previous stages fail (condition: always()).
-	•	Can send notifications, create work items, cleanup, etc.
-
-⸻
-
-Parameters
-
-Pipeline supports compile-time parameters:
-
-Parameter	Type	Default	Description
-environment	string	dev	Target environment (dev, acc, prod)
-runInfra	boolean	true	Toggle infra stage
-runTests	boolean	true	Toggle test stage
-extraArgs	string	""	Extra CLI args passed into infra deploy
-
-Example manual run:
-
+```yaml
 environment: acc
 runInfra: true
 runTests: false
 extraArgs: "--what-if"
+```
 
+---
 
-⸻
+## Stages
 
-Variables & Templates
+### 1. Prep
 
-Inline variables
+Checkout repositories and set output variables for downstream stages.
 
-Defined inside the YAML:
+- Checks out `self`, `infraRepo`, and `templatesRepo`
+- Logs directory paths for debugging
+- Exports output variables (e.g., git SHA)
 
+### 2. Build
+
+Build the application using matrix strategy with caching.
+
+- Matrix job for parallel builds
+- npm/pip cache restoration
+- Publishes `drop` artifact
+
+### 3. Test *(conditional)*
+
+Execute unit tests. Only runs when `runTests=true`.
+
+### 4. Infra *(conditional)*
+
+Deploy infrastructure using Azure CLI. Only runs when `runInfra=true`.
+
+- Uses deployment job with environment gates
+- Executes Bicep/Terraform/ARM deployment
+- Runs against configured Azure Service Connection
+
+### 5. App
+
+Deploy application using artifacts from Build stage.
+
+- Downloads `drop` artifact
+- Executes deployment logic
+
+### 6. Post *(always runs)*
+
+Finalization tasks that run regardless of previous stage results.
+
+- Send notifications
+- Create work items
+- Cleanup resources
+
+---
+
+## Variables
+
+### Inline Variables
+
+```yaml
 variables:
   vmImage: ubuntu-latest
   buildConfig: Release
+```
 
-Variable group
+### Variable Groups
 
 Loaded from Azure DevOps Library:
 
+```yaml
 - group: shared-secrets
+```
 
-Typical use: store secrets like subscription IDs, service principals, tokens, etc.
+Store secrets like subscription IDs, service principals, and tokens.
 
-Environment templates
+### Environment Templates
 
 Loaded per environment:
 
+```yaml
 - template: variables/vars-${{ parameters.environment }}.yaml
+```
 
-Expected variables inside each env file:
+**Required variables in each environment file:**
 
+```yaml
 azureServiceConnection: "spoke-robin-dev"
 adoEnvironmentName: "robin-dev"
 location: "westeurope"
+```
 
+---
 
-⸻
+## Multi-Repo Checkout
 
-Multi-Repo Checkout
+### Resource Definition
 
-This pipeline checks out multiple repos:
-
+```yaml
 resources:
   repositories:
   - repository: infraRepo
     name: MyProject/infra-repo
   - repository: templatesRepo
     name: MyProject/pipeline-templates
+```
 
-Checkout usage:
+### Checkout Usage
 
+```yaml
 - checkout: infraRepo
   path: shared-infra
+```
 
-✅ Important deployment-job path rule
-In a deployment: job, extra repos are located under:
+### Path Variables
 
-$(Pipeline.Workspace)/<path>
+| Variable | Description |
+|----------|-------------|
+| `$(System.DefaultWorkingDirectory)` | Root of self repo |
+| `$(Pipeline.Workspace)` | Root for all repos + artifacts |
+| `$(Build.SourcesDirectory)` | Self repo root |
 
-Use these variables safely:
+> **Note:** In deployment jobs, extra repos are located under `$(Pipeline.Workspace)/<path>`
 
-Variable	Meaning
-$(System.DefaultWorkingDirectory)	Root of self repo
-$(Pipeline.Workspace)	Root for all repos + artifacts
-$(Build.SourcesDirectory)	Self repo root (mostly same as DefaultWorkingDirectory)
+**Example path setup:**
 
-Example:
-
+```bash
 SELF_ROOT="$(System.DefaultWorkingDirectory)"
 INFRA_ROOT="$(Pipeline.Workspace)/shared-infra"
 TEMPLATES_ROOT="$(Pipeline.Workspace)/templates"
+```
 
+---
 
-⸻
+## Azure CLI Tasks
 
-Azure CLI Tasks
+Infrastructure stage uses `AzureCLI@2`:
 
-Infra stage uses AzureCLI@2:
-
+```yaml
 - task: AzureCLI@2
   inputs:
     azureSubscription: $(azureServiceConnection)
@@ -179,69 +217,56 @@ Infra stage uses AzureCLI@2:
     scriptLocation: inlineScript
     inlineScript: |
       az group list -o table
+```
 
-Make sure your Service Connection has the right RBAC role on the subscription.
+Ensure your Service Connection has appropriate RBAC permissions on the target subscription.
 
-⸻
+---
 
-Artifacts
+## Artifacts
 
-Build publishes an artifact named drop:
+### Publishing (Build Stage)
 
+```yaml
 - publish: $(System.DefaultWorkingDirectory)/dist
   artifact: drop
+```
 
-App stage downloads it:
+### Downloading (App Stage)
 
+```yaml
 - download: current
   artifact: drop
+```
 
-The artifact ends up in:
+Artifact location: `$(Pipeline.Workspace)/drop`
 
-$(Pipeline.Workspace)/drop
+---
 
+## Troubleshooting
 
-⸻
+### Debug Path Variables
 
-How to Use This Template in a New Project
-	1.	Copy pipeline.yml into your repo
-	2.	Update:
-	•	resources.repositories names
-	•	variable templates in /variables
-	•	Azure Service Connection name
-	•	build/test/deploy scripts
-	3.	Run pipeline manually once for validation
-	4.	Gradually remove unused stages
+Add this step to debug directory structure:
 
-⸻
-
-Troubleshooting Tips
-
-Print all useful paths
-
-Add this step when debugging:
-
+```bash
 echo "Build.SourcesDirectory=$(Build.SourcesDirectory)"
 echo "System.DefaultWorkingDirectory=$(System.DefaultWorkingDirectory)"
 echo "Pipeline.Workspace=$(Pipeline.Workspace)"
 pwd
 find "$(Pipeline.Workspace)" -maxdepth 2 -type d
+```
 
-Common errors
+### Common Errors
 
-Error	Cause	Fix
-unexpected value stage	stage used without stages:	wrap top-level in stages:
-repo not found under /s/	deployment jobs store extra repos elsewhere	use $(Pipeline.Workspace)
-file not found	variable points to self repo but file is in fork repo	correct variable paths
+| Error | Cause | Solution |
+|-------|-------|----------|
+| `unexpected value stage` | `stage` used without `stages:` | Wrap top-level in `stages:` |
+| Repo not found under `/s/` | Deployment jobs store extra repos elsewhere | Use `$(Pipeline.Workspace)` |
+| File not found | Variable points to wrong repo | Correct variable paths |
 
+---
 
-⸻
+## License
 
-License / Usage
-
-This pipeline template is intended for internal reuse.
-Fork and adapt per application or infra stack.
-
-⸻
-
-If you want, paste your real repo names + folder layout and I’ll produce a “final” README version that matches your exact project (with your Bicep/Terraform paths + naming conventions).
+This pipeline template is intended for internal reuse. Fork and adapt per application or infrastructure stack.

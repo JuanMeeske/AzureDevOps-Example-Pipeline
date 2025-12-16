@@ -1,0 +1,651 @@
+# ==========================================
+# AZURE DEVOPS KUBERNETES PIPELINE TEMPLATE
+# Copy → simplify per project
+# ==========================================
+
+name: $(Date:yyyyMMdd)$(Rev:.r)-k8s
+
+# -----------------------
+# TRIGGERS
+# -----------------------
+trigger:
+  branches:
+    include:
+      - main
+      - releases/*
+  paths:
+    include:
+      - k8s/*
+      - helm/*
+      - src/*
+    exclude:
+      - docs/*
+
+pr:
+  branches:
+    include:
+      - main
+      - develop
+
+# Optional scheduled runs
+schedules:
+- cron: "0 3 * * Mon-Fri"     # 03:00 UTC weekdays
+  displayName: Nightly K8s sync
+  branches:
+    include:
+      - main
+  always: false
+
+# -----------------------
+# RESOURCES
+# -----------------------
+resources:
+  repositories:
+  - repository: helmCharts
+    type: git
+    name: MyProject/helm-charts
+    ref: refs/heads/main
+  - repository: k8sManifests
+    type: git
+    name: MyProject/k8s-manifests
+    ref: refs/heads/main
+
+  containers:
+  - container: kubectl_container
+    image: bitnami/kubectl:1.31
+  - container: helm_container
+    image: alpine/helm:3.16.3
+
+# -----------------------
+# PARAMETERS (compile-time)
+# -----------------------
+parameters:
+- name: environment
+  type: string
+  default: dev
+  values: [dev, staging, prod]
+
+- name: kubernetesCluster
+  type: string
+  default: aks-dev-cluster
+  displayName: "Target Kubernetes Cluster"
+
+- name: namespace
+  type: string
+  default: default
+  displayName: "Target Namespace"
+
+- name: deploymentStrategy
+  type: string
+  default: kubectl
+  values: [kubectl, helm, kustomize]
+  displayName: "Deployment Strategy"
+
+- name: helmReleaseName
+  type: string
+  default: myapp
+  displayName: "Helm Release Name"
+
+- name: helmChartPath
+  type: string
+  default: charts/myapp
+  displayName: "Helm Chart Path"
+
+- name: kubectlManifestPath
+  type: string
+  default: k8s/manifests
+  displayName: "Kubectl Manifests Path"
+
+- name: imageTag
+  type: string
+  default: latest
+  displayName: "Container Image Tag"
+
+- name: runTests
+  type: boolean
+  default: true
+
+- name: dryRun
+  type: boolean
+  default: false
+  displayName: "Dry Run (no actual deployment)"
+
+# -----------------------
+# VARIABLES (runtime)
+# -----------------------
+variables:
+  # Inline vars
+  vmImage: ubuntu-latest
+  kubectlVersion: '1.31.0'
+  helmVersion: '3.16.3'
+
+  # Variable groups (library)
+  - group: k8s-secrets   # contains KUBECONFIG, registry creds, etc.
+
+  # Environment-specific variable template
+  - template: variables/vars-${{ parameters.environment }}.yaml
+
+# ==========================================
+# STAGES
+# ==========================================
+stages:
+
+# ------------------------------------------
+# STAGE 1: PREP / INSTALL TOOLS
+# ------------------------------------------
+- stage: Prep
+  displayName: "Prep & Install Tools"
+  jobs:
+  - job: install_tools
+    displayName: "Install K8s Tools"
+    pool:
+      vmImage: $(vmImage)
+
+    steps:
+    - checkout: self
+      displayName: "Checkout self"
+      fetchDepth: 0
+
+    # ----------------------------
+    # INSTALL KUBECTL
+    # ----------------------------
+    - task: KubectlInstaller@0
+      displayName: "Install kubectl $(kubectlVersion)"
+      inputs:
+        kubectlVersion: $(kubectlVersion)
+
+    # Alternative: Manual kubectl install (if KubectlInstaller not available)
+    - bash: |
+        echo "Verifying kubectl installation..."
+        kubectl version --client --output=yaml
+        
+        # Manual install fallback (uncomment if needed)
+        # KUBECTL_VERSION="v$(kubectlVersion)"
+        # curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+        # chmod +x kubectl
+        # sudo mv kubectl /usr/local/bin/
+        # kubectl version --client
+      displayName: "Verify kubectl"
+
+    # ----------------------------
+    # INSTALL HELM
+    # ----------------------------
+    - task: HelmInstaller@1
+      displayName: "Install Helm $(helmVersion)"
+      inputs:
+        helmVersionToInstall: $(helmVersion)
+
+    - bash: |
+        echo "Verifying Helm installation..."
+        helm version
+      displayName: "Verify Helm"
+
+    # ----------------------------
+    # INSTALL ADDITIONAL TOOLS
+    # ----------------------------
+    # Kustomize
+    - bash: |
+        echo "Installing Kustomize..."
+        curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+        sudo mv kustomize /usr/local/bin/
+        kustomize version
+      displayName: "Install Kustomize"
+
+    # kubeseal (for sealed-secrets)
+    - bash: |
+        echo "Installing kubeseal..."
+        KUBESEAL_VERSION="0.27.2"
+        curl -OL "https://github.com/bitnami-labs/sealed-secrets/releases/download/v${KUBESEAL_VERSION}/kubeseal-${KUBESEAL_VERSION}-linux-amd64.tar.gz"
+        tar -xzf kubeseal-${KUBESEAL_VERSION}-linux-amd64.tar.gz
+        sudo mv kubeseal /usr/local/bin/
+        kubeseal --version
+      displayName: "Install kubeseal"
+      condition: eq(variables['installKubeseal'], 'true')
+
+    # k9s (optional CLI tool for debugging)
+    - bash: |
+        echo "Installing k9s..."
+        K9S_VERSION="v0.32.7"
+        curl -LO "https://github.com/derailed/k9s/releases/download/${K9S_VERSION}/k9s_Linux_amd64.tar.gz"
+        tar -xzf k9s_Linux_amd64.tar.gz
+        sudo mv k9s /usr/local/bin/
+        k9s version
+      displayName: "Install k9s (optional)"
+      condition: eq(variables['installK9s'], 'true')
+
+    # ----------------------------
+    # SET OUTPUT VARIABLES
+    # ----------------------------
+    - bash: |
+        echo "##vso[task.setvariable variable=gitSha;isOutput=true]$(Build.SourceVersion)"
+        echo "##vso[task.setvariable variable=gitShort;isOutput=true]$(echo $(Build.SourceVersion) | cut -c1-7)"
+        echo "##vso[task.setvariable variable=buildId;isOutput=true]$(Build.BuildId)"
+      name: setvars
+      displayName: "Set output vars"
+
+# ------------------------------------------
+# STAGE 2: BUILD & PUSH CONTAINER IMAGE
+# ------------------------------------------
+- stage: Build
+  displayName: "Build Container Image"
+  dependsOn: Prep
+  variables:
+    gitShort: $[ stageDependencies.Prep.install_tools.outputs['setvars.gitShort'] ]
+  jobs:
+
+  - job: build_image
+    displayName: "Build & Push Image"
+    pool:
+      vmImage: $(vmImage)
+
+    steps:
+    - checkout: self
+
+    # Login to container registry (ACR example)
+    - task: Docker@2
+      displayName: "Login to ACR"
+      inputs:
+        command: login
+        containerRegistry: $(containerRegistryServiceConnection)
+
+    # Build and push
+    - task: Docker@2
+      displayName: "Build and Push"
+      inputs:
+        command: buildAndPush
+        repository: $(containerRepository)
+        dockerfile: $(Build.SourcesDirectory)/Dockerfile
+        containerRegistry: $(containerRegistryServiceConnection)
+        tags: |
+          $(gitShort)
+          ${{ parameters.imageTag }}
+          $(Build.BuildId)
+
+    # Publish Kubernetes manifests as artifact
+    - publish: $(Build.SourcesDirectory)/${{ parameters.kubectlManifestPath }}
+      artifact: k8s-manifests
+      displayName: "Publish K8s manifests"
+      condition: eq('${{ parameters.deploymentStrategy }}', 'kubectl')
+
+    # Publish Helm chart as artifact
+    - publish: $(Build.SourcesDirectory)/${{ parameters.helmChartPath }}
+      artifact: helm-chart
+      displayName: "Publish Helm chart"
+      condition: eq('${{ parameters.deploymentStrategy }}', 'helm')
+
+# ------------------------------------------
+# STAGE 3: VALIDATE (lint, dry-run)
+# ------------------------------------------
+- stage: Validate
+  displayName: "Validate K8s Resources"
+  dependsOn: Build
+  condition: and(succeeded(), eq('${{ parameters.runTests }}', true))
+  jobs:
+
+  - job: validate_manifests
+    displayName: "Validate Manifests"
+    pool:
+      vmImage: $(vmImage)
+
+    steps:
+    - checkout: self
+
+    - task: KubectlInstaller@0
+      displayName: "Install kubectl"
+      inputs:
+        kubectlVersion: $(kubectlVersion)
+
+    - task: HelmInstaller@1
+      displayName: "Install Helm"
+      inputs:
+        helmVersionToInstall: $(helmVersion)
+
+    # ----------------------------
+    # KUBECTL VALIDATION
+    # ----------------------------
+    - bash: |
+        echo "Validating Kubernetes manifests..."
+        for file in $(find ${{ parameters.kubectlManifestPath }} -name '*.yaml' -o -name '*.yml'); do
+          echo "Validating: $file"
+          kubectl apply --dry-run=client -f "$file" || exit 1
+        done
+        echo "All manifests are valid!"
+      displayName: "kubectl dry-run validation"
+      condition: eq('${{ parameters.deploymentStrategy }}', 'kubectl')
+
+    # ----------------------------
+    # HELM VALIDATION
+    # ----------------------------
+    - bash: |
+        echo "Linting Helm chart..."
+        helm lint ${{ parameters.helmChartPath }}
+        
+        echo "Template validation..."
+        helm template ${{ parameters.helmReleaseName }} ${{ parameters.helmChartPath }} \
+          --namespace ${{ parameters.namespace }} \
+          --set image.tag=${{ parameters.imageTag }} \
+          > /tmp/rendered.yaml
+        
+        echo "Validating rendered templates..."
+        kubectl apply --dry-run=client -f /tmp/rendered.yaml
+      displayName: "Helm lint & template validation"
+      condition: eq('${{ parameters.deploymentStrategy }}', 'helm')
+
+    # ----------------------------
+    # KUSTOMIZE VALIDATION
+    # ----------------------------
+    - bash: |
+        echo "Installing Kustomize..."
+        curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+        sudo mv kustomize /usr/local/bin/
+        
+        echo "Building kustomize overlay..."
+        kustomize build ${{ parameters.kubectlManifestPath }}/overlays/${{ parameters.environment }} > /tmp/kustomize-output.yaml
+        
+        echo "Validating kustomize output..."
+        kubectl apply --dry-run=client -f /tmp/kustomize-output.yaml
+      displayName: "Kustomize build & validation"
+      condition: eq('${{ parameters.deploymentStrategy }}', 'kustomize')
+
+# ------------------------------------------
+# STAGE 4: DEPLOY TO KUBERNETES
+# ------------------------------------------
+- stage: Deploy
+  displayName: "Deploy to Kubernetes"
+  dependsOn: Validate
+  condition: and(succeeded(), eq('${{ parameters.dryRun }}', false))
+  jobs:
+
+  - deployment: deploy_k8s
+    displayName: "Deploy to ${{ parameters.environment }}"
+    environment: ${{ parameters.environment }}-k8s.${{ parameters.namespace }}
+    pool:
+      vmImage: $(vmImage)
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+
+          # ----------------------------
+          # INSTALL TOOLS
+          # ----------------------------
+          - task: KubectlInstaller@0
+            displayName: "Install kubectl"
+            inputs:
+              kubectlVersion: $(kubectlVersion)
+
+          - task: HelmInstaller@1
+            displayName: "Install Helm"
+            inputs:
+              helmVersionToInstall: $(helmVersion)
+
+          # ----------------------------
+          # CONNECT TO KUBERNETES CLUSTER
+          # ----------------------------
+          # Option 1: Using Kubernetes Service Connection
+          - task: Kubernetes@1
+            displayName: "Set kubectl context (Service Connection)"
+            inputs:
+              connectionType: 'Kubernetes Service Connection'
+              kubernetesServiceEndpoint: $(kubernetesServiceConnection)
+              command: 'get'
+              arguments: 'nodes'
+              outputFormat: 'wide'
+
+          # Option 2: Using Azure AKS (uncomment if using AKS)
+          # - task: AzureCLI@2
+          #   displayName: "Get AKS credentials"
+          #   inputs:
+          #     azureSubscription: $(azureServiceConnection)
+          #     scriptType: bash
+          #     scriptLocation: inlineScript
+          #     inlineScript: |
+          #       az aks get-credentials \
+          #         --resource-group $(aksResourceGroup) \
+          #         --name ${{ parameters.kubernetesCluster }} \
+          #         --overwrite-existing
+          #       kubectl config current-context
+          #       kubectl get nodes
+
+          # ----------------------------
+          # CREATE/VERIFY NAMESPACE
+          # ----------------------------
+          - task: Kubernetes@1
+            displayName: "Create namespace if not exists"
+            inputs:
+              connectionType: 'Kubernetes Service Connection'
+              kubernetesServiceEndpoint: $(kubernetesServiceConnection)
+              command: 'apply'
+              useConfigurationFile: false
+              inline: |
+                apiVersion: v1
+                kind: Namespace
+                metadata:
+                  name: ${{ parameters.namespace }}
+                  labels:
+                    environment: ${{ parameters.environment }}
+
+          # ----------------------------
+          # DEPLOY: KUBECTL STRATEGY
+          # ----------------------------
+          - task: KubernetesManifest@1
+            displayName: "Deploy manifests (kubectl)"
+            condition: eq('${{ parameters.deploymentStrategy }}', 'kubectl')
+            inputs:
+              action: 'deploy'
+              connectionType: 'kubernetesServiceConnection'
+              kubernetesServiceConnection: $(kubernetesServiceConnection)
+              namespace: ${{ parameters.namespace }}
+              manifests: |
+                $(Build.SourcesDirectory)/${{ parameters.kubectlManifestPath }}/*.yaml
+              containers: |
+                $(containerRegistry)/$(containerRepository):${{ parameters.imageTag }}
+
+          # ----------------------------
+          # DEPLOY: HELM STRATEGY
+          # ----------------------------
+          - task: HelmDeploy@1
+            displayName: "Deploy Helm chart"
+            condition: eq('${{ parameters.deploymentStrategy }}', 'helm')
+            inputs:
+              connectionType: 'Kubernetes Service Connection'
+              kubernetesServiceEndpoint: $(kubernetesServiceConnection)
+              namespace: ${{ parameters.namespace }}
+              command: 'upgrade'
+              chartType: 'FilePath'
+              chartPath: $(Build.SourcesDirectory)/${{ parameters.helmChartPath }}
+              releaseName: ${{ parameters.helmReleaseName }}
+              install: true
+              waitForExecution: true
+              arguments: >
+                --set image.repository=$(containerRegistry)/$(containerRepository)
+                --set image.tag=${{ parameters.imageTag }}
+                --set environment=${{ parameters.environment }}
+                --timeout 10m0s
+                --atomic
+
+          # ----------------------------
+          # DEPLOY: KUSTOMIZE STRATEGY
+          # ----------------------------
+          - bash: |
+              echo "Installing Kustomize..."
+              curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+              sudo mv kustomize /usr/local/bin/
+              
+              echo "Applying kustomize overlay for ${{ parameters.environment }}..."
+              kustomize build ${{ parameters.kubectlManifestPath }}/overlays/${{ parameters.environment }} | kubectl apply -f -
+            displayName: "Deploy with Kustomize"
+            condition: eq('${{ parameters.deploymentStrategy }}', 'kustomize')
+
+# ------------------------------------------
+# STAGE 5: VERIFY DEPLOYMENT
+# ------------------------------------------
+- stage: Verify
+  displayName: "Verify Deployment"
+  dependsOn: Deploy
+  condition: succeeded()
+  jobs:
+
+  - job: verify_deployment
+    displayName: "Verify K8s Deployment"
+    pool:
+      vmImage: $(vmImage)
+
+    steps:
+    - task: KubectlInstaller@0
+      displayName: "Install kubectl"
+      inputs:
+        kubectlVersion: $(kubectlVersion)
+
+    # ----------------------------
+    # CHECK ROLLOUT STATUS
+    # ----------------------------
+    - task: Kubernetes@1
+      displayName: "Check rollout status"
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: $(kubernetesServiceConnection)
+        namespace: ${{ parameters.namespace }}
+        command: 'rollout'
+        arguments: 'status deployment/${{ parameters.helmReleaseName }} --timeout=300s'
+
+    # ----------------------------
+    # GET DEPLOYMENT INFO
+    # ----------------------------
+    - task: Kubernetes@1
+      displayName: "Get deployment details"
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: $(kubernetesServiceConnection)
+        namespace: ${{ parameters.namespace }}
+        command: 'get'
+        arguments: 'deployments,pods,services -l app=${{ parameters.helmReleaseName }} -o wide'
+
+    # ----------------------------
+    # HEALTH CHECK
+    # ----------------------------
+    - bash: |
+        echo "Waiting for pods to be ready..."
+        sleep 30
+        
+        # Get service endpoint
+        SERVICE_IP=$(kubectl get svc ${{ parameters.helmReleaseName }} -n ${{ parameters.namespace }} -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+        
+        if [ -n "$SERVICE_IP" ]; then
+          echo "Service IP: $SERVICE_IP"
+          # Uncomment to enable health check
+          # curl -sf "http://${SERVICE_IP}/health" && echo "Health check passed!" || echo "Health check endpoint not available"
+        else
+          echo "Service is ClusterIP or LoadBalancer IP not yet assigned"
+        fi
+        
+        echo "Deployment verification complete!"
+      displayName: "Basic health check"
+
+    # ----------------------------
+    # GET EVENTS (for debugging)
+    # ----------------------------
+    - task: Kubernetes@1
+      displayName: "Get recent events"
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: $(kubernetesServiceConnection)
+        namespace: ${{ parameters.namespace }}
+        command: 'get'
+        arguments: 'events --sort-by=.lastTimestamp | tail -20'
+      condition: always()
+
+# ------------------------------------------
+# STAGE 6: CLEANUP / NOTIFY
+# ------------------------------------------
+- stage: Post
+  displayName: "Post Deployment"
+  dependsOn:
+    - Verify
+  condition: always()
+  jobs:
+
+  - job: notify
+    displayName: "Notify & Cleanup"
+    pool:
+      vmImage: $(vmImage)
+
+    steps:
+    - bash: |
+        echo "=========================================="
+        echo "DEPLOYMENT SUMMARY"
+        echo "=========================================="
+        echo "Environment: ${{ parameters.environment }}"
+        echo "Cluster: ${{ parameters.kubernetesCluster }}"
+        echo "Namespace: ${{ parameters.namespace }}"
+        echo "Strategy: ${{ parameters.deploymentStrategy }}"
+        echo "Image Tag: ${{ parameters.imageTag }}"
+        echo "Pipeline Status: $(Agent.JobStatus)"
+        echo "Build ID: $(Build.BuildId)"
+        echo "=========================================="
+      displayName: "Deployment Summary"
+
+    # Cleanup old images/releases (optional)
+    - bash: |
+        echo "Cleanup tasks would run here..."
+        # Example: Remove old Helm releases
+        # helm list -n ${{ parameters.namespace }} --filter '^${{ parameters.helmReleaseName }}' -q | head -n -3 | xargs -I {} helm uninstall {} -n ${{ parameters.namespace }}
+      displayName: "Cleanup (optional)"
+      condition: and(succeeded(), eq(variables['runCleanup'], 'true'))
+
+# ------------------------------------------
+# STAGE 7: ROLLBACK (manual trigger only)
+# ------------------------------------------
+- stage: Rollback
+  displayName: "Rollback (Manual)"
+  dependsOn: []
+  condition: eq(variables['triggerRollback'], 'true')
+  jobs:
+
+  - deployment: rollback_k8s
+    displayName: "Rollback Deployment"
+    environment: ${{ parameters.environment }}-k8s.${{ parameters.namespace }}
+    pool:
+      vmImage: $(vmImage)
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: KubectlInstaller@0
+            displayName: "Install kubectl"
+            inputs:
+              kubectlVersion: $(kubectlVersion)
+
+          - task: HelmInstaller@1
+            displayName: "Install Helm"
+            inputs:
+              helmVersionToInstall: $(helmVersion)
+
+          # Kubectl rollback
+          - task: Kubernetes@1
+            displayName: "Rollback deployment (kubectl)"
+            condition: eq('${{ parameters.deploymentStrategy }}', 'kubectl')
+            inputs:
+              connectionType: 'Kubernetes Service Connection'
+              kubernetesServiceEndpoint: $(kubernetesServiceConnection)
+              namespace: ${{ parameters.namespace }}
+              command: 'rollout'
+              arguments: 'undo deployment/${{ parameters.helmReleaseName }}'
+
+          # Helm rollback
+          - task: HelmDeploy@1
+            displayName: "Rollback Helm release"
+            condition: eq('${{ parameters.deploymentStrategy }}', 'helm')
+            inputs:
+              connectionType: 'Kubernetes Service Connection'
+              kubernetesServiceEndpoint: $(kubernetesServiceConnection)
+              namespace: ${{ parameters.namespace }}
+              command: 'rollback'
+              arguments: '${{ parameters.helmReleaseName }} 0'
+
+          - bash: |
+              echo "Rollback initiated for ${{ parameters.helmReleaseName }}"
+              echo "Checking rollout status..."
+            displayName: "Rollback complete"
+
