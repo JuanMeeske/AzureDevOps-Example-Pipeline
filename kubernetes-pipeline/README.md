@@ -183,11 +183,9 @@ k8s/
 
 | Tool | Version | Purpose |
 |------|---------|---------|
+| Azure CLI | latest | Azure resource management |
 | kubectl | 1.31.0 | Kubernetes CLI |
 | Helm | 3.16.3 | Kubernetes package manager |
-| Kustomize | latest | Kubernetes configuration management |
-| kubeseal | 0.27.2 | Sealed Secrets (optional) |
-| k9s | 0.32.7 | Terminal UI for K8s (optional) |
 
 ## Service Connection Options
 
@@ -308,9 +306,7 @@ steps:
     parameters:
       kubectlVersion: '1.31.0'
       helmVersion: '3.16.3'
-      installKustomize: true      # Optional
-      installKubeseal: false      # Optional
-      installK9s: false           # Optional
+      installAzureCLI: true       # Install Azure CLI (default: true)
       useAzureDevOpsTasks: true   # Use Azure DevOps tasks vs manual install
 ```
 
@@ -320,12 +316,7 @@ steps:
 |-----------|------|---------|-------------|
 | `kubectlVersion` | string | `1.31.0` | kubectl version |
 | `helmVersion` | string | `3.16.3` | Helm version |
-| `kustomizeVersion` | string | `` | Kustomize version (empty = latest) |
-| `kubesealVersion` | string | `0.27.2` | kubeseal version |
-| `k9sVersion` | string | `v0.32.7` | k9s version |
-| `installKustomize` | boolean | `false` | Install Kustomize |
-| `installKubeseal` | boolean | `false` | Install kubeseal |
-| `installK9s` | boolean | `false` | Install k9s |
+| `installAzureCLI` | boolean | `true` | Install Azure CLI |
 | `useAzureDevOpsTasks` | boolean | `true` | Use Azure DevOps tasks or manual curl install |
 
 ### Template: Get K8s Credentials

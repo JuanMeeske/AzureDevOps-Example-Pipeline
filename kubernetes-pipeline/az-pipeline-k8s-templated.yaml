@@ -140,9 +140,6 @@ stages:
             parameters:
               kubectlVersion: $(kubectlVersion)
               helmVersion: $(helmVersion)
-              installKustomize: ${{ eq(parameters.deploymentStrategy, 'kustomize') }}
-              installKubeseal: false
-              installK9s: false
               useAzureDevOpsTasks: true
 
           # Set output variables
@@ -221,7 +218,6 @@ stages:
             parameters:
               kubectlVersion: $(kubectlVersion)
               helmVersion: $(helmVersion)
-              installKustomize: ${{ eq(parameters.deploymentStrategy, 'kustomize') }}
 
           # Kubectl validation
           - bash: |
@@ -286,7 +282,6 @@ stages:
                   parameters:
                     kubectlVersion: $(kubectlVersion)
                     helmVersion: $(helmVersion)
-                    installKustomize: ${{ eq(parameters.deploymentStrategy, 'kustomize') }}
 
                 # ========================================
                 # USE TEMPLATE: Get K8s Credentials
