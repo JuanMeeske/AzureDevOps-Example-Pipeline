@@ -1,0 +1,165 @@
+# ==========================================
+# TEMPLATE: Install Kubernetes Tools
+# ==========================================
+# Usage:
+#   - template: templates/install-k8s-tools.yaml
+#     parameters:
+#       kubectlVersion: '1.31.0'
+#       helmVersion: '3.16.3'
+#       installKustomize: true
+# ==========================================
+
+parameters:
+  # Tool versions
+  - name: kubectlVersion
+    type: string
+    default: '1.31.0'
+
+  - name: helmVersion
+    type: string
+    default: '3.16.3'
+
+  - name: kustomizeVersion
+    type: string
+    default: ''  # Empty = latest
+
+  - name: kubesealVersion
+    type: string
+    default: '0.27.2'
+
+  - name: k9sVersion
+    type: string
+    default: 'v0.32.7'
+
+  # Optional tool installation flags
+  - name: installKustomize
+    type: boolean
+    default: false
+
+  - name: installKubeseal
+    type: boolean
+    default: false
+
+  - name: installK9s
+    type: boolean
+    default: false
+
+  # Control whether to use Azure DevOps tasks or manual install
+  - name: useAzureDevOpsTasks
+    type: boolean
+    default: true
+
+steps:
+  # ----------------------------
+  # INSTALL KUBECTL
+  # ----------------------------
+  - ${{ if eq(parameters.useAzureDevOpsTasks, true) }}:
+    - task: KubectlInstaller@0
+      displayName: "Install kubectl ${{ parameters.kubectlVersion }}"
+      inputs:
+        kubectlVersion: ${{ parameters.kubectlVersion }}
+
+  - ${{ if eq(parameters.useAzureDevOpsTasks, false) }}:
+    - bash: |
+        echo "Installing kubectl ${{ parameters.kubectlVersion }}..."
+        KUBECTL_VERSION="v${{ parameters.kubectlVersion }}"
+        curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+        curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl.sha256"
+        echo "$(cat kubectl.sha256)  kubectl" | sha256sum --check
+        chmod +x kubectl
+        sudo mv kubectl /usr/local/bin/
+        rm -f kubectl.sha256
+      displayName: "Install kubectl ${{ parameters.kubectlVersion }} (manual)"
+
+  - bash: |
+      echo "Verifying kubectl installation..."
+      kubectl version --client --output=yaml
+    displayName: "Verify kubectl"
+
+  # ----------------------------
+  # INSTALL HELM
+  # ----------------------------
+  - ${{ if eq(parameters.useAzureDevOpsTasks, true) }}:
+    - task: HelmInstaller@1
+      displayName: "Install Helm ${{ parameters.helmVersion }}"
+      inputs:
+        helmVersionToInstall: ${{ parameters.helmVersion }}
+
+  - ${{ if eq(parameters.useAzureDevOpsTasks, false) }}:
+    - bash: |
+        echo "Installing Helm ${{ parameters.helmVersion }}..."
+        curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        chmod 700 get_helm.sh
+        ./get_helm.sh --version v${{ parameters.helmVersion }}
+        rm -f get_helm.sh
+      displayName: "Install Helm ${{ parameters.helmVersion }} (manual)"
+
+  - bash: |
+      echo "Verifying Helm installation..."
+      helm version
+    displayName: "Verify Helm"
+
+  # ----------------------------
+  # INSTALL KUSTOMIZE (optional)
+  # ----------------------------
+  - ${{ if eq(parameters.installKustomize, true) }}:
+    - bash: |
+        echo "Installing Kustomize..."
+        ${{ if ne(parameters.kustomizeVersion, '') }}:
+          # Install specific version
+          KUSTOMIZE_VERSION="${{ parameters.kustomizeVersion }}"
+          curl -LO "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
+          tar -xzf kustomize_v${KUSTOMIZE_VERSION}_linux_amd64.tar.gz
+        ${{ if eq(parameters.kustomizeVersion, '') }}:
+          # Install latest
+          curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+        sudo mv kustomize /usr/local/bin/
+        kustomize version
+      displayName: "Install Kustomize"
+
+  # ----------------------------
+  # INSTALL KUBESEAL (optional)
+  # ----------------------------
+  - ${{ if eq(parameters.installKubeseal, true) }}:
+    - bash: |
+        echo "Installing kubeseal ${{ parameters.kubesealVersion }}..."
+        KUBESEAL_VERSION="${{ parameters.kubesealVersion }}"
+        curl -OL "https://github.com/bitnami-labs/sealed-secrets/releases/download/v${KUBESEAL_VERSION}/kubeseal-${KUBESEAL_VERSION}-linux-amd64.tar.gz"
+        tar -xzf kubeseal-${KUBESEAL_VERSION}-linux-amd64.tar.gz
+        sudo mv kubeseal /usr/local/bin/
+        rm -f kubeseal-${KUBESEAL_VERSION}-linux-amd64.tar.gz
+        kubeseal --version
+      displayName: "Install kubeseal ${{ parameters.kubesealVersion }}"
+
+  # ----------------------------
+  # INSTALL K9S (optional)
+  # ----------------------------
+  - ${{ if eq(parameters.installK9s, true) }}:
+    - bash: |
+        echo "Installing k9s ${{ parameters.k9sVersion }}..."
+        K9S_VERSION="${{ parameters.k9sVersion }}"
+        curl -LO "https://github.com/derailed/k9s/releases/download/${K9S_VERSION}/k9s_Linux_amd64.tar.gz"
+        tar -xzf k9s_Linux_amd64.tar.gz
+        sudo mv k9s /usr/local/bin/
+        rm -f k9s_Linux_amd64.tar.gz LICENSE README.md
+        k9s version
+      displayName: "Install k9s ${{ parameters.k9sVersion }}"
+
+  # ----------------------------
+  # SUMMARY
+  # ----------------------------
+  - bash: |
+      echo "=========================================="
+      echo "K8S TOOLS INSTALLATION SUMMARY"
+      echo "=========================================="
+      echo "kubectl: $(kubectl version --client --short 2>/dev/null || kubectl version --client -o yaml | grep gitVersion | head -1)"
+      echo "helm: $(helm version --short)"
+      ${{ if eq(parameters.installKustomize, true) }}:
+        echo "kustomize: $(kustomize version)"
+      ${{ if eq(parameters.installKubeseal, true) }}:
+        echo "kubeseal: $(kubeseal --version)"
+      ${{ if eq(parameters.installK9s, true) }}:
+        echo "k9s: $(k9s version --short 2>/dev/null || k9s version)"
+      echo "=========================================="
+    displayName: "Tools installation summary"
+

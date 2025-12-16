@@ -2,6 +2,15 @@
 
 A comprehensive Azure DevOps pipeline template for deploying to Kubernetes clusters. Supports kubectl, Helm, and Kustomize deployment strategies.
 
+## Files
+
+| File | Description |
+|------|-------------|
+| `az-pipeline-k8s.yaml` | Full pipeline (all-in-one, no templates) |
+| `az-pipeline-k8s-templated.yaml` | Main pipeline using reusable templates |
+| `templates/install-k8s-tools.yaml` | Template: Install K8s tools (kubectl, helm, etc.) |
+| `templates/get-k8s-credentials.yaml` | Template: Get K8s cluster credentials |
+
 ## Features
 
 - **Tool Installation**: Automatically installs kubectl, Helm, Kustomize, and optional tools (kubeseal, k9s)
@@ -11,6 +20,7 @@ A comprehensive Azure DevOps pipeline template for deploying to Kubernetes clust
 - **Rollout Verification**: Automatic deployment status checks
 - **Rollback Support**: Manual rollback stage for emergencies
 - **Container Build**: Integrated Docker build and push to registry
+- **Reusable Templates**: Modular templates for tools and credentials
 
 ## Prerequisites
 
@@ -282,9 +292,144 @@ Add this step for debugging failed deployments:
   condition: failed()
 ```
 
+## Using Templates (Recommended)
+
+The templated version (`az-pipeline-k8s-templated.yaml`) uses reusable templates for cleaner, DRY pipelines.
+
+### Template: Install K8s Tools
+
+**File**: `templates/install-k8s-tools.yaml`
+
+Installs kubectl, Helm, and optionally Kustomize, kubeseal, k9s.
+
+```yaml
+steps:
+  - template: templates/install-k8s-tools.yaml
+    parameters:
+      kubectlVersion: '1.31.0'
+      helmVersion: '3.16.3'
+      installKustomize: true      # Optional
+      installKubeseal: false      # Optional
+      installK9s: false           # Optional
+      useAzureDevOpsTasks: true   # Use Azure DevOps tasks vs manual install
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `kubectlVersion` | string | `1.31.0` | kubectl version |
+| `helmVersion` | string | `3.16.3` | Helm version |
+| `kustomizeVersion` | string | `` | Kustomize version (empty = latest) |
+| `kubesealVersion` | string | `0.27.2` | kubeseal version |
+| `k9sVersion` | string | `v0.32.7` | k9s version |
+| `installKustomize` | boolean | `false` | Install Kustomize |
+| `installKubeseal` | boolean | `false` | Install kubeseal |
+| `installK9s` | boolean | `false` | Install k9s |
+| `useAzureDevOpsTasks` | boolean | `true` | Use Azure DevOps tasks or manual curl install |
+
+### Template: Get K8s Credentials
+
+**File**: `templates/get-k8s-credentials.yaml`
+
+Gets credentials for connecting to Kubernetes clusters. Supports multiple providers.
+
+```yaml
+steps:
+  # Option 1: Kubernetes Service Connection
+  - template: templates/get-k8s-credentials.yaml
+    parameters:
+      connectionType: serviceConnection
+      kubernetesServiceConnection: 'my-k8s-connection'
+      namespace: 'myapp'
+
+  # Option 2: Azure AKS
+  - template: templates/get-k8s-credentials.yaml
+    parameters:
+      connectionType: aks
+      azureServiceConnection: 'azure-subscription'
+      aksResourceGroup: 'rg-aks-prod'
+      aksClusterName: 'aks-prod-cluster'
+      aksAdmin: false
+      namespace: 'myapp'
+
+  # Option 3: Kubeconfig variable
+  - template: templates/get-k8s-credentials.yaml
+    parameters:
+      connectionType: kubeconfig
+      kubeconfigVariable: 'KUBECONFIG_CONTENT'
+      namespace: 'myapp'
+
+  # Option 4: Google GKE
+  - template: templates/get-k8s-credentials.yaml
+    parameters:
+      connectionType: gke
+      gkeProject: 'my-gcp-project'
+      gkeCluster: 'gke-cluster-name'
+      gkeZone: 'us-central1-a'
+      namespace: 'myapp'
+
+  # Option 5: AWS EKS
+  - template: templates/get-k8s-credentials.yaml
+    parameters:
+      connectionType: eks
+      awsServiceConnection: 'aws-connection'
+      eksClusterName: 'eks-cluster-name'
+      awsRegion: 'us-east-1'
+      namespace: 'myapp'
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `connectionType` | string | `serviceConnection` | Type: serviceConnection, aks, kubeconfig, gke, eks |
+| `kubernetesServiceConnection` | string | | K8s service connection name |
+| `azureServiceConnection` | string | | Azure service connection (for AKS) |
+| `aksResourceGroup` | string | | AKS resource group |
+| `aksClusterName` | string | | AKS cluster name |
+| `aksAdmin` | boolean | `false` | Use admin credentials for AKS |
+| `gcpServiceConnection` | string | | GCP service connection (for GKE) |
+| `gkeProject` | string | | GCP project ID |
+| `gkeCluster` | string | | GKE cluster name |
+| `gkeZone` | string | | GKE zone |
+| `awsServiceConnection` | string | | AWS service connection (for EKS) |
+| `eksClusterName` | string | | EKS cluster name |
+| `awsRegion` | string | `us-east-1` | AWS region |
+| `kubeconfigVariable` | string | `KUBECONFIG_CONTENT` | Variable containing kubeconfig |
+| `namespace` | string | `default` | Target namespace |
+| `verifyConnection` | boolean | `true` | Verify cluster connectivity |
+
+### Using Templates from Another Repository
+
+Store templates in a shared repository for organization-wide reuse:
+
+```yaml
+resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: MyOrg/pipeline-templates
+      ref: refs/heads/main
+
+stages:
+  - stage: Deploy
+    jobs:
+      - job: deploy
+        steps:
+          - template: k8s/install-tools.yaml@templates
+            parameters:
+              kubectlVersion: '1.31.0'
+              
+          - template: k8s/get-credentials.yaml@templates
+            parameters:
+              connectionType: aks
+              aksClusterName: 'my-cluster'
+```
+
 ## Related Resources
 
 - [Azure DevOps Kubernetes Tasks](https://docs.microsoft.com/en-us/azure/devops/pipelines/tasks/deploy/kubernetes)
 - [Helm Deploy Task](https://docs.microsoft.com/en-us/azure/devops/pipelines/tasks/deploy/helm-deploy)
 - [KubernetesManifest Task](https://docs.microsoft.com/en-us/azure/devops/pipelines/tasks/deploy/kubernetes-manifest)
-
+- [Azure DevOps Templates](https://docs.microsoft.com/en-us/azure/devops/pipelines/process/templates)
