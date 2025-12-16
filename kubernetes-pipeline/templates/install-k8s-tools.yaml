@@ -49,7 +49,21 @@ parameters:
     type: boolean
     default: true
 
+  # Install Azure CLI
+  - name: installAzureCLI
+    type: boolean
+    default: true
+
 steps:
+  # ----------------------------
+  # INSTALL AZURE CLI
+  # ----------------------------
+  - ${{ if eq(parameters.installAzureCLI, true) }}:
+    - script: |
+        curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+        az version
+      displayName: "Install Azure CLI"
+
   # ----------------------------
   # INSTALL KUBECTL
   # ----------------------------
@@ -152,6 +166,8 @@ steps:
       echo "=========================================="
       echo "K8S TOOLS INSTALLATION SUMMARY"
       echo "=========================================="
+      ${{ if eq(parameters.installAzureCLI, true) }}:
+        echo "az cli: $(az version --query '"azure-cli"' -o tsv)"
       echo "kubectl: $(kubectl version --client --short 2>/dev/null || kubectl version --client -o yaml | grep gitVersion | head -1)"
       echo "helm: $(helm version --short)"
       ${{ if eq(parameters.installKustomize, true) }}:

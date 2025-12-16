@@ -147,6 +147,14 @@ stages:
       fetchDepth: 0
 
     # ----------------------------
+    # INSTALL AZURE CLI
+    # ----------------------------
+    - script: |
+        curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+        az version
+      displayName: "Install Azure CLI"
+
+    # ----------------------------
     # INSTALL KUBECTL
     # ----------------------------
     - task: KubectlInstaller@0
