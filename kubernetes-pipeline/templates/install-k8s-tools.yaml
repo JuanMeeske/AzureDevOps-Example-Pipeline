@@ -6,6 +6,7 @@
 #     parameters:
 #       kubectlVersion: '1.31.0'
 #       helmVersion: '3.16.3'
+#       shellType: 'bash'  # or 'pwsh'
 # ==========================================
 
 parameters:
@@ -28,95 +29,231 @@ parameters:
     type: boolean
     default: true
 
+  # Shell type: 'bash' or 'pwsh'
+  - name: shellType
+    type: string
+    default: 'bash'
+    values:
+      - bash
+      - pwsh
+
 steps:
-  # ----------------------------
-  # INSTALL PREREQUISITES
-  # ----------------------------
-  - bash: |
-      echo "Installing prerequisites..."
-      sudo apt-get update
-      sudo apt-get install -y unzip curl
-    displayName: "Install prerequisites (unzip, curl)"
-
-  # ----------------------------
-  # INSTALL AZURE CLI
-  # ----------------------------
-  - ${{ if eq(parameters.installAzureCLI, true) }}:
+  # ============================================
+  # BASH STEPS
+  # ============================================
+  - ${{ if eq(parameters.shellType, 'bash') }}:
+    # ----------------------------
+    # INSTALL PREREQUISITES (bash)
+    # ----------------------------
     - bash: |
-        # Check if az is already installed (common on Microsoft-hosted agents)
+        echo "Installing prerequisites..."
+        sudo apt-get update
+        sudo apt-get install -y unzip curl
+      displayName: "Install prerequisites (unzip, curl)"
+
+    # ----------------------------
+    # INSTALL AZURE CLI (bash)
+    # ----------------------------
+    - ${{ if eq(parameters.installAzureCLI, true) }}:
+      - bash: |
+          # Check if az is already installed (common on Microsoft-hosted agents)
+          if command -v az &> /dev/null; then
+            echo "Azure CLI already installed"
+            az version
+          else
+            echo "Installing Azure CLI..."
+            curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+            export PATH=$PATH:/usr/bin
+            az version
+          fi
+        displayName: "Install Azure CLI"
+
+    # ----------------------------
+    # INSTALL KUBECTL (bash)
+    # ----------------------------
+    - ${{ if eq(parameters.useAzureDevOpsTasks, true) }}:
+      - task: KubectlInstaller@0
+        displayName: "Install kubectl ${{ parameters.kubectlVersion }}"
+        inputs:
+          kubectlVersion: ${{ parameters.kubectlVersion }}
+
+    - ${{ if eq(parameters.useAzureDevOpsTasks, false) }}:
+      - bash: |
+          echo "Installing kubectl ${{ parameters.kubectlVersion }}..."
+          KUBECTL_VERSION="v${{ parameters.kubectlVersion }}"
+          curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl.sha256"
+          echo "$(cat kubectl.sha256)  kubectl" | sha256sum --check
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
+          rm -f kubectl.sha256
+        displayName: "Install kubectl ${{ parameters.kubectlVersion }} (manual)"
+
+    - bash: |
+        echo "Verifying kubectl installation..."
+        kubectl version --client --output=yaml
+      displayName: "Verify kubectl"
+
+    # ----------------------------
+    # INSTALL HELM (bash)
+    # ----------------------------
+    - ${{ if eq(parameters.useAzureDevOpsTasks, true) }}:
+      - task: HelmInstaller@1
+        displayName: "Install Helm ${{ parameters.helmVersion }}"
+        inputs:
+          helmVersionToInstall: ${{ parameters.helmVersion }}
+
+    - ${{ if eq(parameters.useAzureDevOpsTasks, false) }}:
+      - bash: |
+          echo "Installing Helm ${{ parameters.helmVersion }}..."
+          curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+          chmod 700 get_helm.sh
+          ./get_helm.sh --version v${{ parameters.helmVersion }}
+          rm -f get_helm.sh
+        displayName: "Install Helm ${{ parameters.helmVersion }} (manual)"
+
+    - bash: |
+        echo "Verifying Helm installation..."
+        helm version
+      displayName: "Verify Helm"
+
+    # ----------------------------
+    # SUMMARY (bash)
+    # ----------------------------
+    - bash: |
+        echo "=========================================="
+        echo "K8S TOOLS INSTALLATION SUMMARY"
+        echo "=========================================="
         if command -v az &> /dev/null; then
-          echo "Azure CLI already installed"
-          az version
-        else
-          echo "Installing Azure CLI..."
-          curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
-          # Reload PATH
-          export PATH=$PATH:/usr/bin
-          az version
+          echo "az cli: $(az version --query '"azure-cli"' -o tsv)"
         fi
-      displayName: "Install Azure CLI"
+        echo "kubectl: $(kubectl version --client --short 2>/dev/null || kubectl version --client -o yaml | grep gitVersion | head -1)"
+        echo "helm: $(helm version --short)"
+        echo "=========================================="
+      displayName: "Tools installation summary"
 
-  # ----------------------------
-  # INSTALL KUBECTL
-  # ----------------------------
-  - ${{ if eq(parameters.useAzureDevOpsTasks, true) }}:
-    - task: KubectlInstaller@0
-      displayName: "Install kubectl ${{ parameters.kubectlVersion }}"
-      inputs:
-        kubectlVersion: ${{ parameters.kubectlVersion }}
+  # ============================================
+  # POWERSHELL STEPS
+  # ============================================
+  - ${{ if eq(parameters.shellType, 'pwsh') }}:
+    # ----------------------------
+    # INSTALL AZURE CLI (PowerShell)
+    # ----------------------------
+    - ${{ if eq(parameters.installAzureCLI, true) }}:
+      - pwsh: |
+          Write-Host "Checking Azure CLI installation..."
+          $azInstalled = Get-Command az -ErrorAction SilentlyContinue
+          if ($azInstalled) {
+              Write-Host "Azure CLI already installed"
+              az version
+          } else {
+              Write-Host "Installing Azure CLI..."
+              # Windows installation
+              $ProgressPreference = 'SilentlyContinue'
+              Invoke-WebRequest -Uri https://aka.ms/installazurecliwindows -OutFile .\AzureCLI.msi
+              Start-Process msiexec.exe -Wait -ArgumentList '/I AzureCLI.msi /quiet'
+              Remove-Item .\AzureCLI.msi
+              # Refresh PATH
+              $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+              az version
+          }
+        displayName: "Install Azure CLI"
 
-  - ${{ if eq(parameters.useAzureDevOpsTasks, false) }}:
-    - bash: |
-        echo "Installing kubectl ${{ parameters.kubectlVersion }}..."
-        KUBECTL_VERSION="v${{ parameters.kubectlVersion }}"
-        curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
-        curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl.sha256"
-        echo "$(cat kubectl.sha256)  kubectl" | sha256sum --check
-        chmod +x kubectl
-        sudo mv kubectl /usr/local/bin/
-        rm -f kubectl.sha256
-      displayName: "Install kubectl ${{ parameters.kubectlVersion }} (manual)"
+    # ----------------------------
+    # INSTALL KUBECTL (PowerShell)
+    # ----------------------------
+    - ${{ if eq(parameters.useAzureDevOpsTasks, true) }}:
+      - task: KubectlInstaller@0
+        displayName: "Install kubectl ${{ parameters.kubectlVersion }}"
+        inputs:
+          kubectlVersion: ${{ parameters.kubectlVersion }}
 
-  - bash: |
-      echo "Verifying kubectl installation..."
-      kubectl version --client --output=yaml
-    displayName: "Verify kubectl"
+    - ${{ if eq(parameters.useAzureDevOpsTasks, false) }}:
+      - pwsh: |
+          Write-Host "Installing kubectl ${{ parameters.kubectlVersion }}..."
+          $kubectlVersion = "v${{ parameters.kubectlVersion }}"
+          $ProgressPreference = 'SilentlyContinue'
+          
+          # Download kubectl
+          $kubectlUrl = "https://dl.k8s.io/release/$kubectlVersion/bin/windows/amd64/kubectl.exe"
+          Invoke-WebRequest -Uri $kubectlUrl -OutFile kubectl.exe
+          
+          # Move to a directory in PATH
+          $installPath = "$env:USERPROFILE\.azure-kubectl"
+          New-Item -ItemType Directory -Force -Path $installPath | Out-Null
+          Move-Item -Force kubectl.exe "$installPath\kubectl.exe"
+          
+          # Add to PATH for this session
+          $env:Path += ";$installPath"
+          
+          Write-Host "kubectl installed to $installPath"
+        displayName: "Install kubectl ${{ parameters.kubectlVersion }} (manual)"
 
-  # ----------------------------
-  # INSTALL HELM
-  # ----------------------------
-  - ${{ if eq(parameters.useAzureDevOpsTasks, true) }}:
-    - task: HelmInstaller@1
-      displayName: "Install Helm ${{ parameters.helmVersion }}"
-      inputs:
-        helmVersionToInstall: ${{ parameters.helmVersion }}
+    - pwsh: |
+        Write-Host "Verifying kubectl installation..."
+        kubectl version --client --output=yaml
+      displayName: "Verify kubectl"
 
-  - ${{ if eq(parameters.useAzureDevOpsTasks, false) }}:
-    - bash: |
-        echo "Installing Helm ${{ parameters.helmVersion }}..."
-        curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
-        chmod 700 get_helm.sh
-        ./get_helm.sh --version v${{ parameters.helmVersion }}
-        rm -f get_helm.sh
-      displayName: "Install Helm ${{ parameters.helmVersion }} (manual)"
+    # ----------------------------
+    # INSTALL HELM (PowerShell)
+    # ----------------------------
+    - ${{ if eq(parameters.useAzureDevOpsTasks, true) }}:
+      - task: HelmInstaller@1
+        displayName: "Install Helm ${{ parameters.helmVersion }}"
+        inputs:
+          helmVersionToInstall: ${{ parameters.helmVersion }}
 
-  - bash: |
-      echo "Verifying Helm installation..."
-      helm version
-    displayName: "Verify Helm"
+    - ${{ if eq(parameters.useAzureDevOpsTasks, false) }}:
+      - pwsh: |
+          Write-Host "Installing Helm ${{ parameters.helmVersion }}..."
+          $helmVersion = "${{ parameters.helmVersion }}"
+          $ProgressPreference = 'SilentlyContinue'
+          
+          # Download Helm
+          $helmUrl = "https://get.helm.sh/helm-v$helmVersion-windows-amd64.zip"
+          Invoke-WebRequest -Uri $helmUrl -OutFile helm.zip
+          
+          # Extract
+          Expand-Archive -Path helm.zip -DestinationPath helm-extract -Force
+          
+          # Move to a directory in PATH
+          $installPath = "$env:USERPROFILE\.azure-helm"
+          New-Item -ItemType Directory -Force -Path $installPath | Out-Null
+          Move-Item -Force helm-extract\windows-amd64\helm.exe "$installPath\helm.exe"
+          
+          # Cleanup
+          Remove-Item -Recurse -Force helm.zip, helm-extract
+          
+          # Add to PATH for this session
+          $env:Path += ";$installPath"
+          
+          Write-Host "Helm installed to $installPath"
+        displayName: "Install Helm ${{ parameters.helmVersion }} (manual)"
 
-  # ----------------------------
-  # SUMMARY
-  # ----------------------------
-  - bash: |
-      echo "=========================================="
-      echo "K8S TOOLS INSTALLATION SUMMARY"
-      echo "=========================================="
-      if command -v az &> /dev/null; then
-        echo "az cli: $(az version --query '"azure-cli"' -o tsv)"
-      fi
-      echo "kubectl: $(kubectl version --client --short 2>/dev/null || kubectl version --client -o yaml | grep gitVersion | head -1)"
-      echo "helm: $(helm version --short)"
-      echo "=========================================="
-    displayName: "Tools installation summary"
+    - pwsh: |
+        Write-Host "Verifying Helm installation..."
+        helm version
+      displayName: "Verify Helm"
 
+    # ----------------------------
+    # SUMMARY (PowerShell)
+    # ----------------------------
+    - pwsh: |
+        Write-Host "=========================================="
+        Write-Host "K8S TOOLS INSTALLATION SUMMARY"
+        Write-Host "=========================================="
+        
+        $azInstalled = Get-Command az -ErrorAction SilentlyContinue
+        if ($azInstalled) {
+            $azVersion = (az version --query '"azure-cli"' -o tsv)
+            Write-Host "az cli: $azVersion"
+        }
+        
+        $kubectlVersion = kubectl version --client --output=yaml 2>$null | Select-String "gitVersion" | Select-Object -First 1
+        Write-Host "kubectl: $kubectlVersion"
+        
+        $helmVersion = helm version --short
+        Write-Host "helm: $helmVersion"
+        
+        Write-Host "=========================================="
+      displayName: "Tools installation summary"

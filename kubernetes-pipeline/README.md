@@ -298,16 +298,28 @@ The templated version (`az-pipeline-k8s-templated.yaml`) uses reusable templates
 
 **File**: `templates/install-k8s-tools.yaml`
 
-Installs kubectl, Helm, and optionally Kustomize, kubeseal, k9s.
+Installs Azure CLI, kubectl, and Helm. Supports both Bash (Linux) and PowerShell (Windows).
 
+**Bash Example (Linux agents):**
 ```yaml
 steps:
   - template: templates/install-k8s-tools.yaml
     parameters:
       kubectlVersion: '1.31.0'
       helmVersion: '3.16.3'
-      installAzureCLI: true       # Install Azure CLI (default: true)
-      useAzureDevOpsTasks: true   # Use Azure DevOps tasks vs manual install
+      installAzureCLI: true
+      shellType: bash              # Use bash scripts (default)
+```
+
+**PowerShell Example (Windows agents):**
+```yaml
+steps:
+  - template: templates/install-k8s-tools.yaml
+    parameters:
+      kubectlVersion: '1.31.0'
+      helmVersion: '3.16.3'
+      installAzureCLI: true
+      shellType: pwsh              # Use PowerShell scripts
 ```
 
 **Parameters:**
@@ -317,14 +329,16 @@ steps:
 | `kubectlVersion` | string | `1.31.0` | kubectl version |
 | `helmVersion` | string | `3.16.3` | Helm version |
 | `installAzureCLI` | boolean | `true` | Install Azure CLI |
-| `useAzureDevOpsTasks` | boolean | `true` | Use Azure DevOps tasks or manual curl install |
+| `useAzureDevOpsTasks` | boolean | `true` | Use Azure DevOps tasks or manual install |
+| `shellType` | string | `bash` | Shell type: `bash` or `pwsh` |
 
 ### Template: Get K8s Credentials
 
 **File**: `templates/get-k8s-credentials.yaml`
 
-Gets credentials for connecting to Kubernetes clusters. Supports multiple providers.
+Gets credentials for connecting to Kubernetes clusters. Supports multiple providers and both Bash/PowerShell.
 
+**Bash Examples:**
 ```yaml
 steps:
   # Option 1: Kubernetes Service Connection
@@ -333,6 +347,7 @@ steps:
       connectionType: serviceConnection
       kubernetesServiceConnection: 'my-k8s-connection'
       namespace: 'myapp'
+      shellType: bash
 
   # Option 2: Azure AKS
   - template: templates/get-k8s-credentials.yaml
@@ -341,33 +356,30 @@ steps:
       azureServiceConnection: 'azure-subscription'
       aksResourceGroup: 'rg-aks-prod'
       aksClusterName: 'aks-prod-cluster'
-      aksAdmin: false
       namespace: 'myapp'
+      shellType: bash
+```
 
-  # Option 3: Kubeconfig variable
+**PowerShell Examples:**
+```yaml
+steps:
+  # Azure AKS with PowerShell
+  - template: templates/get-k8s-credentials.yaml
+    parameters:
+      connectionType: aks
+      azureServiceConnection: 'azure-subscription'
+      aksResourceGroup: 'rg-aks-prod'
+      aksClusterName: 'aks-prod-cluster'
+      namespace: 'myapp'
+      shellType: pwsh
+
+  # Kubeconfig with PowerShell
   - template: templates/get-k8s-credentials.yaml
     parameters:
       connectionType: kubeconfig
       kubeconfigVariable: 'KUBECONFIG_CONTENT'
       namespace: 'myapp'
-
-  # Option 4: Google GKE
-  - template: templates/get-k8s-credentials.yaml
-    parameters:
-      connectionType: gke
-      gkeProject: 'my-gcp-project'
-      gkeCluster: 'gke-cluster-name'
-      gkeZone: 'us-central1-a'
-      namespace: 'myapp'
-
-  # Option 5: AWS EKS
-  - template: templates/get-k8s-credentials.yaml
-    parameters:
-      connectionType: eks
-      awsServiceConnection: 'aws-connection'
-      eksClusterName: 'eks-cluster-name'
-      awsRegion: 'us-east-1'
-      namespace: 'myapp'
+      shellType: pwsh
 ```
 
 **Parameters:**
@@ -375,6 +387,7 @@ steps:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `connectionType` | string | `serviceConnection` | Type: serviceConnection, aks, kubeconfig, gke, eks |
+| `shellType` | string | `bash` | Shell type: `bash` or `pwsh` |
 | `kubernetesServiceConnection` | string | | K8s service connection name |
 | `azureServiceConnection` | string | | Azure service connection (for AKS) |
 | `aksResourceGroup` | string | | AKS resource group |

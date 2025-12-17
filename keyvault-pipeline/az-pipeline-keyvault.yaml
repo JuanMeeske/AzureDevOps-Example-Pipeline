@@ -1,0 +1,52 @@
+trigger: none
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  keyVaultName: "my-keyvault-name"
+  secretName1: "my-securefile-1"
+  secretName2: "my-securefile-2"
+
+steps:
+  # --- Install Tools ---
+  - template: ../kubernetes-pipeline/templates/install-k8s-tools.yaml
+    parameters:
+      installAzureCLI: true
+      shellType: 'bash'
+
+  # --- Download secure files from Library ---
+  - task: DownloadSecureFile@1
+    name: secureFile1
+    inputs:
+      secureFile: "cert.pfx"     # <-- Secure file name in Library
+
+  - task: DownloadSecureFile@1
+    name: secureFile2
+    inputs:
+      secureFile: "appsettings.json"  # <-- Secure file name in Library
+
+  # --- Push file contents to Key Vault as secrets ---
+  - task: AzureCLI@2
+    displayName: "Upload secure files to Key Vault as secrets"
+    inputs:
+      azureSubscription: "My-Azure-Service-Connection"  # <-- your service connection name
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        set -euo pipefail
+
+        echo "Uploading $(secureFile1.secureFilePath) to Key Vault secret: $(secretName1)"
+        az keyvault secret set \
+          --vault-name "$(keyVaultName)" \
+          --name "$(secretName1)" \
+          --file "$(secureFile1.secureFilePath)" \
+          --output none
+
+        echo "Uploading $(secureFile2.secureFilePath) to Key Vault secret: $(secretName2)"
+        az keyvault secret set \
+          --vault-name "$(keyVaultName)" \
+          --name "$(secretName2)" \
+          --file "$(secureFile2.secureFilePath)" \
+          --output none
+
