@@ -1,0 +1,261 @@
+# ==========================================
+# AZURE DEVOPS ARGOCD INSTALLATION PIPELINE
+# Installs Argo CD via Helm on a Kubernetes cluster
+# ==========================================
+
+name: $(Date:yyyyMMdd)$(Rev:.r)-argocd
+
+# -----------------------
+# TRIGGERS
+# -----------------------
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - argocd-pipeline/*
+
+pr:
+  branches:
+    include:
+      - main
+
+# -----------------------
+# PARAMETERS
+# -----------------------
+parameters:
+- name: kubernetesServiceConnection
+  type: string
+  displayName: "Kubernetes Service Connection"
+
+- name: namespace
+  type: string
+  default: argocd
+  displayName: "ArgoCD Namespace"
+
+- name: helmReleaseName
+  type: string
+  default: argocd
+  displayName: "Helm Release Name"
+
+- name: helmTimeout
+  type: string
+  default: '10m'
+  displayName: "Helm Install Timeout"
+
+- name: waitForRollout
+  type: boolean
+  default: true
+  displayName: "Wait for ArgoCD Server Rollout"
+
+- name: printAdminPassword
+  type: boolean
+  default: true
+  displayName: "Print Initial Admin Password"
+
+- name: uninstallArgoCD
+  type: boolean
+  default: false
+  displayName: "Uninstall ArgoCD (deletes release and namespace)"
+
+# -----------------------
+# VARIABLES
+# -----------------------
+variables:
+  vmImage: ubuntu-latest
+  kubectlVersion: '1.31.0'
+  helmVersion: '3.16.3'
+
+# ==========================================
+# STAGES
+# ==========================================
+stages:
+
+# ------------------------------------------
+# STAGE 1: INSTALL ARGOCD
+# ------------------------------------------
+- stage: InstallArgoCD
+  displayName: "Install Argo CD"
+  condition: eq('${{ parameters.uninstallArgoCD }}', false)
+  jobs:
+
+  - job: install_argocd
+    displayName: "Install Argo CD with Helm"
+    pool:
+      vmImage: $(vmImage)
+
+    steps:
+    - checkout: self
+      displayName: "Checkout"
+
+    # ----------------------------
+    # INSTALL K8S TOOLS (kubectl, helm)
+    # ----------------------------
+    - template: ../kubernetes-pipeline/templates/install-k8s-tools.yaml
+      parameters:
+        kubectlVersion: $(kubectlVersion)
+        helmVersion: $(helmVersion)
+        installAzureCLI: false
+
+    # ----------------------------
+    # CONNECT TO KUBERNETES CLUSTER
+    # ----------------------------
+    - task: Kubernetes@1
+      displayName: "Verify cluster connection"
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: ${{ parameters.kubernetesServiceConnection }}
+        command: 'get'
+        arguments: 'nodes'
+        outputFormat: 'wide'
+
+    # ----------------------------
+    # ADD ARGO HELM REPO & INSTALL
+    # ----------------------------
+    - task: HelmDeploy@1
+      displayName: "Add Argo Helm repository"
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: ${{ parameters.kubernetesServiceConnection }}
+        command: 'repo'
+        arguments: 'add argo https://argoproj.github.io/argo-helm'
+
+    - bash: |
+        helm repo update
+      displayName: "Update Helm repositories"
+
+    - task: HelmDeploy@1
+      displayName: "Install/Upgrade Argo CD"
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: ${{ parameters.kubernetesServiceConnection }}
+        namespace: ${{ parameters.namespace }}
+        command: 'upgrade'
+        chartType: 'Name'
+        chartName: 'argo/argo-cd'
+        releaseName: ${{ parameters.helmReleaseName }}
+        install: true
+        waitForExecution: true
+        arguments: '--create-namespace --timeout ${{ parameters.helmTimeout }}'
+
+    # ----------------------------
+    # WAIT FOR ROLLOUT
+    # ----------------------------
+    - ${{ if eq(parameters.waitForRollout, true) }}:
+      - task: Kubernetes@1
+        displayName: "Wait for argocd-server rollout"
+        inputs:
+          connectionType: 'Kubernetes Service Connection'
+          kubernetesServiceEndpoint: ${{ parameters.kubernetesServiceConnection }}
+          namespace: ${{ parameters.namespace }}
+          command: 'rollout'
+          arguments: 'status deploy/argocd-server --timeout=300s'
+
+    # ----------------------------
+    # VERIFY INSTALLATION
+    # ----------------------------
+    - task: Kubernetes@1
+      displayName: "Get ArgoCD pods"
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: ${{ parameters.kubernetesServiceConnection }}
+        namespace: ${{ parameters.namespace }}
+        command: 'get'
+        arguments: 'pods -o wide'
+
+    - task: Kubernetes@1
+      displayName: "Get ArgoCD services"
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: ${{ parameters.kubernetesServiceConnection }}
+        namespace: ${{ parameters.namespace }}
+        command: 'get'
+        arguments: 'svc -o wide'
+
+    # ----------------------------
+    # PRINT ADMIN PASSWORD
+    # ----------------------------
+    - ${{ if eq(parameters.printAdminPassword, true) }}:
+      - task: Kubernetes@1
+        displayName: "Get initial admin password"
+        inputs:
+          connectionType: 'Kubernetes Service Connection'
+          kubernetesServiceEndpoint: ${{ parameters.kubernetesServiceConnection }}
+          namespace: ${{ parameters.namespace }}
+          command: 'get'
+          arguments: 'secret argocd-initial-admin-secret -o jsonpath="{.data.password}"'
+          outputFormat: ''
+
+      - bash: |
+          echo "=========================================="
+          echo "ARGOCD INSTALLATION COMPLETE"
+          echo "=========================================="
+          echo "Namespace: ${{ parameters.namespace }}"
+          echo "Release Name: ${{ parameters.helmReleaseName }}"
+          echo ""
+          echo "To access ArgoCD:"
+          echo "  1. Port-forward: kubectl port-forward svc/argocd-server -n ${{ parameters.namespace }} 8080:443"
+          echo "  2. Open: https://localhost:8080"
+          echo "  3. Username: admin"
+          echo "  4. Password: (decode the secret above with: echo '<password>' | base64 -d)"
+          echo "=========================================="
+        displayName: "Installation summary"
+
+# ------------------------------------------
+# STAGE 2: UNINSTALL ARGOCD (toggle)
+# ------------------------------------------
+- stage: UninstallArgoCD
+  displayName: "Uninstall Argo CD"
+  condition: eq('${{ parameters.uninstallArgoCD }}', true)
+  jobs:
+
+  - job: uninstall_argocd
+    displayName: "Uninstall Argo CD with Helm"
+    pool:
+      vmImage: $(vmImage)
+
+    steps:
+    - checkout: self
+      displayName: "Checkout"
+
+    # ----------------------------
+    # INSTALL K8S TOOLS (kubectl, helm)
+    # ----------------------------
+    - template: ../kubernetes-pipeline/templates/install-k8s-tools.yaml
+      parameters:
+        kubectlVersion: $(kubectlVersion)
+        helmVersion: $(helmVersion)
+        installAzureCLI: false
+
+    # ----------------------------
+    # UNINSTALL ARGOCD
+    # ----------------------------
+    - task: HelmDeploy@1
+      displayName: "Uninstall Argo CD"
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: ${{ parameters.kubernetesServiceConnection }}
+        namespace: ${{ parameters.namespace }}
+        command: 'uninstall'
+        arguments: '${{ parameters.helmReleaseName }}'
+
+    # ----------------------------
+    # DELETE NAMESPACE (optional)
+    # ----------------------------
+    - task: Kubernetes@1
+      displayName: "Delete ${{ parameters.namespace }} namespace"
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: ${{ parameters.kubernetesServiceConnection }}
+        command: 'delete'
+        arguments: 'namespace ${{ parameters.namespace }} --ignore-not-found'
+
+    - bash: |
+        echo "=========================================="
+        echo "ARGOCD UNINSTALL COMPLETE"
+        echo "=========================================="
+        echo "Release '${{ parameters.helmReleaseName }}' has been uninstalled"
+        echo "Namespace '${{ parameters.namespace }}' has been deleted"
+        echo "=========================================="
+      displayName: "Uninstall summary"
